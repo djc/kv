@@ -109,6 +109,7 @@ dependencies = [
 name = "kv"
 version = "0.1.0"
 dependencies = [
+ "futures 0.1.21 (registry+https://github.com/rust-lang/crates.io-index)",
  "raft 0.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
  "tokio 0.1.7 (registry+https://github.com/rust-lang/crates.io-index)",
 ]

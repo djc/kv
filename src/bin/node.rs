@@ -10,35 +10,43 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
 // limitations under the License.
+#[macro_use]
+extern crate futures;
 extern crate kv;
 extern crate raft;
+extern crate tokio;
+
+use futures::sync::oneshot;
+use futures::sync::mpsc::{self, Receiver, Sender};
+use futures::{Async, Future, Poll, Sink, Stream};
 
 use kv::{Msg, ProposeCallback};
 
 use std::collections::HashMap;
-use std::sync::mpsc::{self, RecvTimeoutError};
-use std::thread;
 use std::time::{Duration, Instant};
 
 use raft::prelude::*;
 use raft::storage::MemStorage;
 
+use tokio::timer::{Delay, Interval};
+
 // A simple example about how to use the Raft library in Rust.
 fn main() {
-    let (sender, receiver) = mpsc::channel();
-    let mut node = Node::new(receiver);
-    send_propose(sender);
-    node.run();
+    let (sender, receiver) = mpsc::channel(5);
+    let mut rt = tokio::runtime::Runtime::new().unwrap();
+    rt.spawn(send_propose(sender));
+    rt.spawn(Node::new(receiver));
+    rt.shutdown_on_idle().wait().unwrap();
 }
 
 struct Node {
     r: RawNode<MemStorage>,
-    receiver: mpsc::Receiver<Msg>,
+    future: Box<Stream<Item = Msg, Error = ()> + Send> ,
     cbs: HashMap<u8, ProposeCallback>,
 }
 
 impl Node {
-    fn new(receiver: mpsc::Receiver<Msg>) -> Self {
+    fn new(receiver: Receiver<Msg>) -> Self {
         // Create the configuration for the Raft node.
         let cfg = Config {
             // The unique ID for the Raft node.
@@ -67,42 +75,15 @@ impl Node {
             ..Default::default()
         };
 
+        let interval = Interval::new(Instant::now(), Duration::from_millis(100))
+            .map(move |t| Msg::Tick(t))
+            .map_err(move |e| panic!("timer error: {}", e));
         Self {
             // Create the Raft node.
             r: RawNode::new(&cfg, MemStorage::new(), vec![]).unwrap(),
-            receiver,
+            future: Box::new(receiver.select(interval)),
             // Use a HashMap to hold the `propose` callbacks.
             cbs: HashMap::new(),
-        }
-    }
-
-    fn run(&mut self) {
-        // Loop forever to drive the Raft.
-        let mut t = Instant::now();
-        let mut timeout = Duration::from_millis(100);
-
-        loop {
-            match self.receiver.recv_timeout(timeout) {
-                Ok(Msg::Propose { id, cb }) => {
-                    self.cbs.insert(id, cb);
-                    self.r.propose(vec![], vec![id]).unwrap();
-                }
-                Ok(Msg::Raft(m)) => self.r.step(m).unwrap(),
-                Err(RecvTimeoutError::Timeout) => (),
-                Err(RecvTimeoutError::Disconnected) => return,
-            }
-
-            let d = t.elapsed();
-            if d >= timeout {
-                t = Instant::now();
-                timeout = Duration::from_millis(100);
-                // We drive Raft every 100ms.
-                self.r.tick();
-            } else {
-                timeout -= d;
-            }
-
-            self.on_ready();
         }
     }
 
@@ -164,7 +145,7 @@ impl Node {
                 }
 
                 if entry.get_entry_type() == EntryType::EntryNormal {
-                    if let Some(cb) = self.cbs.remove(entry.get_data().get(0).unwrap()) {
+                    if let Some(mut cb) = self.cbs.remove(entry.get_data().get(0).unwrap()) {
                         cb();
                     }
                 }
@@ -178,29 +159,55 @@ impl Node {
     }
 }
 
-fn send_propose(sender: mpsc::Sender<Msg>) {
-    thread::spawn(move || {
-        // Wait some time and send the request to the Raft.
-        thread::sleep(Duration::from_secs(10));
+impl Future for Node {
+    type Item = ();
+    type Error = ();
 
-        let (s1, r1) = mpsc::channel::<u8>();
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        loop {
+            match try_ready!(self.future.poll()) {
+                Some(Msg::Propose { id, cb }) => {
+                    self.cbs.insert(id, cb);
+                    self.r.propose(vec![], vec![id]).unwrap();
+                }
+                Some(Msg::Raft(m)) => self.r.step(m).unwrap(),
+                Some(Msg::Tick(_)) => {
+                    self.r.tick();
+                }
+                None => {
+                    break Ok(Async::Ready(()));
+                },
+            }
+            self.on_ready();
+        }
+    }
+}
 
-        println!("propose a request");
-
-        // Send a command to the Raft, wait for the Raft to apply it
-        // and get the result.
-        sender
-            .send(Msg::Propose {
+fn send_propose(sender: Sender<Msg>) -> impl Future<Item = (), Error = ()> {
+    Delay::new(Instant::now() + Duration::from_secs(10))
+        .map_err(|e| panic!("timer failed; err={:?}", e))
+        .and_then(move |_| {
+            let (s1, r1) = oneshot::channel::<u8>();
+            // Send a command to the Raft, wait for the Raft to apply it
+            // and get the result.
+            let mut s1 = Some(s1);
+            println!("propose a request");
+            let msg = Msg::Propose {
                 id: 1,
                 cb: Box::new(move || {
-                    s1.send(0).unwrap();
-                }),
-            })
-            .unwrap();
+                    s1.take().unwrap().send(0).unwrap();
+                })
+            };
 
-        let n = r1.recv().unwrap();
-        assert_eq!(n, 0);
-
-        println!("receive the propose callback");
-    });
+            sender.send(msg)
+                .map_err(|e| panic!("error {}", e))
+                .and_then(|_| r1)
+                .and_then(|n| {
+                    assert_eq!(n, 0);
+                    println!("receive the propose callback");
+                    Ok(Async::Ready(()))
+                })
+                .map_err(|_| ())
+                .map(|_| ())
+        })
 }

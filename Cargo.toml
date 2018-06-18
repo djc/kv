@@ -4,5 +4,6 @@ version = "0.1.0"
 authors = ["Dirkjan Ochtman <dirkjan@ochtman.nl>"]
 
 [dependencies]
+futures = "0.1"
 tokio = "0.1"
 raft = "0.3"

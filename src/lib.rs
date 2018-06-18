@@ -2,6 +2,8 @@ extern crate raft;
 
 use raft::prelude::*;
 
+use std::time::Instant;
+
 pub enum Msg {
     Propose {
         id: u8,
@@ -11,6 +13,7 @@ pub enum Msg {
     // avoid the compiler warning.
     #[allow(dead_code)]
     Raft(Message),
+    Tick(Instant),
 }
 
-pub type ProposeCallback = Box<Fn() + Send>;
+pub type ProposeCallback = Box<FnMut() + Send>;

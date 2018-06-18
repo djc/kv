@@ -10,8 +10,10 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
 // limitations under the License.
-
+extern crate kv;
 extern crate raft;
+
+use kv::{Msg, ProposeCallback};
 
 use std::collections::HashMap;
 use std::sync::mpsc::{self, RecvTimeoutError};
@@ -20,19 +22,6 @@ use std::time::{Duration, Instant};
 
 use raft::prelude::*;
 use raft::storage::MemStorage;
-
-type ProposeCallback = Box<Fn() + Send>;
-
-enum Msg {
-    Propose {
-        id: u8,
-        cb: ProposeCallback,
-    },
-    // Here we don't use Raft Message, so use dead_code to
-    // avoid the compiler warning.
-    #[allow(dead_code)]
-    Raft(Message),
-}
 
 // A simple example about how to use the Raft library in Rust.
 fn main() {

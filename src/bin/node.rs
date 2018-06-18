@@ -25,147 +25,157 @@ use raft::storage::MemStorage;
 
 // A simple example about how to use the Raft library in Rust.
 fn main() {
-    // Create a storage for Raft, and here we just use a simple memory storage.
-    // You need to build your own persistent storage in your production.
-    // Please check the Storage trait in src/storage.rs to see how to implement one.
-    let storage = MemStorage::new();
-
-    // Create the configuration for the Raft node.
-    let cfg = Config {
-        // The unique ID for the Raft node.
-        id: 1,
-        // The Raft node list.
-        // Mostly, the peers need to be saved in the storage
-        // and we can get them from the Storage::initial_state function, so here
-        // you need to set it empty.
-        peers: vec![1],
-        // Election tick is for how long the follower may campaign again after
-        // it doesn't receive any message from the leader.
-        election_tick: 10,
-        // Heartbeat tick is for how long the leader needs to send
-        // a heartbeat to keep alive.
-        heartbeat_tick: 3,
-        // The max size limits the max size of each appended message. Mostly, 1 MB is enough.
-        max_size_per_msg: 1024 * 1024 * 1024,
-        // Max inflight msgs that the leader sends messages to follower without
-        // receiving ACKs.
-        max_inflight_msgs: 256,
-        // The Raft applied index.
-        // You need to save your applied index when you apply the committed Raft logs.
-        applied: 0,
-        // Just for log
-        tag: format!("[{}]", 1),
-        ..Default::default()
-    };
-
-    // Create the Raft node.
-    let mut r = RawNode::new(&cfg, storage, vec![]).unwrap();
-
     let (sender, receiver) = mpsc::channel();
-
-    // Use another thread to propose a Raft request.
+    let mut node = Node::new(receiver);
     send_propose(sender);
-
-    // Loop forever to drive the Raft.
-    let mut t = Instant::now();
-    let mut timeout = Duration::from_millis(100);
-
-    // Use a HashMap to hold the `propose` callbacks.
-    let mut cbs = HashMap::new();
-
-    loop {
-        match receiver.recv_timeout(timeout) {
-            Ok(Msg::Propose { id, cb }) => {
-                cbs.insert(id, cb);
-                r.propose(vec![], vec![id]).unwrap();
-            }
-            Ok(Msg::Raft(m)) => r.step(m).unwrap(),
-            Err(RecvTimeoutError::Timeout) => (),
-            Err(RecvTimeoutError::Disconnected) => return,
-        }
-
-        let d = t.elapsed();
-        if d >= timeout {
-            t = Instant::now();
-            timeout = Duration::from_millis(100);
-            // We drive Raft every 100ms.
-            r.tick();
-        } else {
-            timeout -= d;
-        }
-
-        on_ready(&mut r, &mut cbs);
-    }
+    node.run();
 }
 
-fn on_ready(r: &mut RawNode<MemStorage>, cbs: &mut HashMap<u8, ProposeCallback>) {
-    if !r.has_ready() {
-        return;
-    }
+struct Node {
+    r: RawNode<MemStorage>,
+    receiver: mpsc::Receiver<Msg>,
+    cbs: HashMap<u8, ProposeCallback>,
+}
 
-    // The Raft is ready, we can do something now.
-    let mut ready = r.ready();
+impl Node {
+    fn new(receiver: mpsc::Receiver<Msg>) -> Self {
+        // Create the configuration for the Raft node.
+        let cfg = Config {
+            // The unique ID for the Raft node.
+            id: 1,
+            // The Raft node list.
+            // Mostly, the peers need to be saved in the storage
+            // and we can get them from the Storage::initial_state function, so here
+            // you need to set it empty.
+            peers: vec![1],
+            // Election tick is for how long the follower may campaign again after
+            // it doesn't receive any message from the leader.
+            election_tick: 10,
+            // Heartbeat tick is for how long the leader needs to send
+            // a heartbeat to keep alive.
+            heartbeat_tick: 3,
+            // The max size limits the max size of each appended message. Mostly, 1 MB is enough.
+            max_size_per_msg: 1024 * 1024 * 1024,
+            // Max inflight msgs that the leader sends messages to follower without
+            // receiving ACKs.
+            max_inflight_msgs: 256,
+            // The Raft applied index.
+            // You need to save your applied index when you apply the committed Raft logs.
+            applied: 0,
+            // Just for log
+            tag: format!("[{}]", 1),
+            ..Default::default()
+        };
 
-    let is_leader = r.raft.leader_id == r.raft.id;
-    if is_leader {
-        // If the peer is leader, the leader can send messages to other followers ASAP.
-        let msgs = ready.messages.drain(..);
-        for _msg in msgs {
-            // Here we only have one peer, so can ignore this.
+        Self {
+            // Create the Raft node.
+            r: RawNode::new(&cfg, MemStorage::new(), vec![]).unwrap(),
+            receiver,
+            // Use a HashMap to hold the `propose` callbacks.
+            cbs: HashMap::new(),
         }
     }
 
-    if !raft::is_empty_snap(&ready.snapshot) {
-        // This is a snapshot, we need to apply the snapshot at first.
-        r.mut_store()
-            .wl()
-            .apply_snapshot(ready.snapshot.clone())
-            .unwrap();
-    }
+    fn run(&mut self) {
+        // Loop forever to drive the Raft.
+        let mut t = Instant::now();
+        let mut timeout = Duration::from_millis(100);
 
-    if !ready.entries.is_empty() {
-        // Append entries to the Raft log
-        r.mut_store().wl().append(&ready.entries).unwrap();
-    }
-
-    if let Some(ref hs) = ready.hs {
-        // Raft HardState changed, and we need to persist it.
-        r.mut_store().wl().set_hardstate(hs.clone());
-    }
-
-    if !is_leader {
-        // If not leader, the follower needs to reply the messages to
-        // the leader after appending Raft entries.
-        let msgs = ready.messages.drain(..);
-        for _msg in msgs {
-            // Send messages to other peers.
-        }
-    }
-
-    if let Some(committed_entries) = ready.committed_entries.take() {
-        let mut _last_apply_index = 0;
-        for entry in committed_entries {
-            // Mostly, you need to save the last apply index to resume applying
-            // after restart. Here we just ignore this because we use a Memory storage.
-            _last_apply_index = entry.get_index();
-
-            if entry.get_data().is_empty() {
-                // Emtpy entry, when the peer becomes Leader it will send an empty entry.
-                continue;
-            }
-
-            if entry.get_entry_type() == EntryType::EntryNormal {
-                if let Some(cb) = cbs.remove(entry.get_data().get(0).unwrap()) {
-                    cb();
+        loop {
+            match self.receiver.recv_timeout(timeout) {
+                Ok(Msg::Propose { id, cb }) => {
+                    self.cbs.insert(id, cb);
+                    self.r.propose(vec![], vec![id]).unwrap();
                 }
+                Ok(Msg::Raft(m)) => self.r.step(m).unwrap(),
+                Err(RecvTimeoutError::Timeout) => (),
+                Err(RecvTimeoutError::Disconnected) => return,
             }
 
-            // TODO: handle EntryConfChange
+            let d = t.elapsed();
+            if d >= timeout {
+                t = Instant::now();
+                timeout = Duration::from_millis(100);
+                // We drive Raft every 100ms.
+                self.r.tick();
+            } else {
+                timeout -= d;
+            }
+
+            self.on_ready();
         }
     }
 
-    // Advance the Raft
-    r.advance(ready);
+    fn on_ready(&mut self) {
+        if !self.r.has_ready() {
+            return;
+        }
+
+        // The Raft is ready, we can do something now.
+        let mut ready = self.r.ready();
+
+        let is_leader = self.r.raft.leader_id == self.r.raft.id;
+        if is_leader {
+            // If the peer is leader, the leader can send messages to other followers ASAP.
+            let msgs = ready.messages.drain(..);
+            for _msg in msgs {
+                // Here we only have one peer, so can ignore this.
+            }
+        }
+
+        if !raft::is_empty_snap(&ready.snapshot) {
+            // This is a snapshot, we need to apply the snapshot at first.
+            self.r
+                .mut_store()
+                .wl()
+                .apply_snapshot(ready.snapshot.clone())
+                .unwrap();
+        }
+
+        if !ready.entries.is_empty() {
+            // Append entries to the Raft log
+            self.r.mut_store().wl().append(&ready.entries).unwrap();
+        }
+
+        if let Some(ref hs) = ready.hs {
+            // Raft HardState changed, and we need to persist it.
+            self.r.mut_store().wl().set_hardstate(hs.clone());
+        }
+
+        if !is_leader {
+            // If not leader, the follower needs to reply the messages to
+            // the leader after appending Raft entries.
+            let msgs = ready.messages.drain(..);
+            for _msg in msgs {
+                // Send messages to other peers.
+            }
+        }
+
+        if let Some(committed_entries) = ready.committed_entries.take() {
+            let mut _last_apply_index = 0;
+            for entry in committed_entries {
+                // Mostly, you need to save the last apply index to resume applying
+                // after restart. Here we just ignore this because we use a Memory storage.
+                _last_apply_index = entry.get_index();
+
+                if entry.get_data().is_empty() {
+                    // Emtpy entry, when the peer becomes Leader it will send an empty entry.
+                    continue;
+                }
+
+                if entry.get_entry_type() == EntryType::EntryNormal {
+                    if let Some(cb) = self.cbs.remove(entry.get_data().get(0).unwrap()) {
+                        cb();
+                    }
+                }
+
+                // TODO: handle EntryConfChange
+            }
+        }
+
+        // Advance the Raft
+        self.r.advance(ready);
+    }
 }
 
 fn send_propose(sender: mpsc::Sender<Msg>) {

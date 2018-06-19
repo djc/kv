@@ -19,6 +19,7 @@ extern crate tokio;
 use futures::sync::oneshot;
 use futures::sync::mpsc::{self, Receiver, Sender};
 use futures::{Async, Future, Poll, Sink, Stream};
+use futures::sink;
 
 use kv::{Msg, ProposeCallback, Response};
 
@@ -34,7 +35,7 @@ use tokio::timer::{Delay, Interval};
 fn main() {
     let (sender, receiver) = mpsc::channel(5);
     let mut rt = tokio::runtime::Runtime::new().unwrap();
-    rt.spawn(send_propose(sender));
+    rt.spawn(ClientConnection::new(sender));
     rt.spawn(Node::new(receiver));
     rt.shutdown_on_idle().wait().unwrap();
 }
@@ -187,33 +188,87 @@ impl Future for Node {
     }
 }
 
-fn send_propose(sender: Sender<Msg>) -> impl Future<Item = (), Error = ()> {
-    Delay::new(Instant::now() + Duration::from_secs(2))
-        .map_err(|e| panic!("timer failed; err={:?}", e))
-        .and_then(move |_| {
-            let (s1, r1) = oneshot::channel::<Response>();
-            // Send a command to the Raft, wait for the Raft to apply it
-            // and get the result.
-            let mut s1 = Some(s1);
-            println!("propose a request");
-            let msg = Msg::Propose {
-                id: 1,
-                key: b"foo".to_vec(),
-                value: b"bar".to_vec(),
-                cb: Box::new(move |rsp| {
-                    s1.take().unwrap().send(rsp).unwrap();
-                })
-            };
+struct ClientConnection {
+    sender: Option<Sender<Msg>>,
+    trigger: Option<Box<Future<Item = (), Error = ()> + Send>>,
+    send: Option<sink::Send<Sender<Msg>>>,
+    receiver: Option<oneshot::Receiver<Response>>,
+}
 
-            sender.send(msg)
-                .map_err(|e| panic!("error {}", e))
-                .and_then(|_| r1)
-                .and_then(|n| {
-                    assert_eq!(n, Ok(()));
-                    println!("receive the propose callback");
-                    Ok(Async::Ready(()))
-                })
-                .map_err(|_| ())
-                .map(|_| ())
-        })
+impl ClientConnection {
+    fn new(sender: Sender<Msg>) -> Self {
+        let trigger = Delay::new(Instant::now() + Duration::from_secs(2))
+            .map_err(|e| panic!("timer failed; err={:?}", e));
+        Self {
+            sender: Some(sender),
+            trigger: Some(Box::new(trigger)),
+            send: None,
+            receiver: None,
+        }
+    }
+}
+
+impl Future for ClientConnection {
+    type Item = ();
+    type Error = ();
+
+    fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
+        let mut waiting = true;
+        loop {
+            if let Some(ref mut trigger) = self.trigger {
+                let _ = try_ready!(trigger.poll());
+                waiting = false;
+            }
+
+            self.trigger.take();
+            if let Some(sender) = self.sender.take() {
+                let (s1, r1) = oneshot::channel::<Response>();
+                // Send a command to the Raft, wait for the Raft to apply it
+                // and get the result.
+                let mut s1 = Some(s1);
+                println!("propose a request");
+                let msg = Msg::Propose {
+                    id: 1,
+                    key: b"foo".to_vec(),
+                    value: b"bar".to_vec(),
+                    cb: Box::new(move |rsp| {
+                        s1.take().unwrap().send(rsp).unwrap();
+                    })
+                };
+                self.send = Some(sender.send(msg));
+                self.receiver = Some(r1);
+                waiting = false;
+            }
+
+            if let Some(ref mut send) = self.send {
+                match send.poll() {
+                    Ok(Async::Ready(_)) => {
+                        waiting = false;
+                    }
+                    Ok(Async::NotReady) => {
+                        return Ok(Async::NotReady);
+                    }
+                    Err(e) => panic!("sending failed: {:?}", e),
+                }
+            }
+
+            self.send.take();
+            if let Some(ref mut receiver) = self.receiver {
+                match receiver.poll() {
+                    Ok(Async::Ready(n)) => {
+                        assert_eq!(n, Ok(()));
+                        println!("receive the propose callback");
+                        return Ok(Async::Ready(()));
+                    }
+                    Ok(Async::NotReady) => {
+                        return Ok(Async::NotReady);
+                    }
+                    Err(e) => panic!("receiver canceled: {:?}", e),
+                }
+            }
+            if waiting {
+                break Ok(Async::NotReady);
+            }
+        }
+    }
 }

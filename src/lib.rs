@@ -7,6 +7,8 @@ use std::time::Instant;
 pub enum Msg {
     Propose {
         id: u8,
+        key: Vec<u8>,
+        value: Vec<u8>,
         cb: ProposeCallback,
     },
     // Here we don't use Raft Message, so use dead_code to

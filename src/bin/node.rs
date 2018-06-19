@@ -145,7 +145,7 @@ impl Node {
                 }
 
                 if entry.get_entry_type() == EntryType::EntryNormal {
-                    if let Some(mut cb) = self.cbs.remove(entry.get_data().get(0).unwrap()) {
+                    if let Some(mut cb) = self.cbs.remove(entry.get_context().get(0).unwrap()) {
                         cb(Ok(()));
                     }
                 }
@@ -166,9 +166,13 @@ impl Future for Node {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         loop {
             match try_ready!(self.future.poll()) {
-                Some(Msg::Propose { id, cb }) => {
+                Some(Msg::Propose { id, mut key, mut value, cb }) => {
                     self.cbs.insert(id, cb);
-                    self.r.propose(vec![], vec![id]).unwrap();
+                    let mut entry_data = vec![key.len() as u8];
+                    entry_data.append(&mut key);
+                    entry_data.push(value.len() as u8);
+                    entry_data.append(&mut value);
+                    self.r.propose(vec![id], entry_data).unwrap();
                 }
                 Some(Msg::Raft(m)) => self.r.step(m).unwrap(),
                 Some(Msg::Tick(_)) => {
@@ -194,6 +198,8 @@ fn send_propose(sender: Sender<Msg>) -> impl Future<Item = (), Error = ()> {
             println!("propose a request");
             let msg = Msg::Propose {
                 id: 1,
+                key: b"foo".to_vec(),
+                value: b"bar".to_vec(),
                 cb: Box::new(move |rsp| {
                     s1.take().unwrap().send(rsp).unwrap();
                 })

@@ -184,7 +184,7 @@ impl Future for Node {
 }
 
 fn send_propose(sender: Sender<Msg>) -> impl Future<Item = (), Error = ()> {
-    Delay::new(Instant::now() + Duration::from_secs(10))
+    Delay::new(Instant::now() + Duration::from_secs(2))
         .map_err(|e| panic!("timer failed; err={:?}", e))
         .and_then(move |_| {
             let (s1, r1) = oneshot::channel::<u8>();

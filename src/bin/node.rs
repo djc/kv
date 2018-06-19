@@ -20,7 +20,7 @@ use futures::sync::oneshot;
 use futures::sync::mpsc::{self, Receiver, Sender};
 use futures::{Async, Future, Poll, Sink, Stream};
 
-use kv::{Msg, ProposeCallback};
+use kv::{Msg, ProposeCallback, Response};
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -146,7 +146,7 @@ impl Node {
 
                 if entry.get_entry_type() == EntryType::EntryNormal {
                     if let Some(mut cb) = self.cbs.remove(entry.get_data().get(0).unwrap()) {
-                        cb();
+                        cb(Ok(()));
                     }
                 }
 
@@ -187,15 +187,15 @@ fn send_propose(sender: Sender<Msg>) -> impl Future<Item = (), Error = ()> {
     Delay::new(Instant::now() + Duration::from_secs(2))
         .map_err(|e| panic!("timer failed; err={:?}", e))
         .and_then(move |_| {
-            let (s1, r1) = oneshot::channel::<u8>();
+            let (s1, r1) = oneshot::channel::<Response>();
             // Send a command to the Raft, wait for the Raft to apply it
             // and get the result.
             let mut s1 = Some(s1);
             println!("propose a request");
             let msg = Msg::Propose {
                 id: 1,
-                cb: Box::new(move || {
-                    s1.take().unwrap().send(0).unwrap();
+                cb: Box::new(move |rsp| {
+                    s1.take().unwrap().send(rsp).unwrap();
                 })
             };
 
@@ -203,7 +203,7 @@ fn send_propose(sender: Sender<Msg>) -> impl Future<Item = (), Error = ()> {
                 .map_err(|e| panic!("error {}", e))
                 .and_then(|_| r1)
                 .and_then(|n| {
-                    assert_eq!(n, 0);
+                    assert_eq!(n, Ok(()));
                     println!("receive the propose callback");
                     Ok(Async::Ready(()))
                 })

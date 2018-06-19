@@ -16,4 +16,6 @@ pub enum Msg {
     Tick(Instant),
 }
 
-pub type ProposeCallback = Box<FnMut() + Send>;
+pub type Response = Result<(), ()>;
+
+pub type ProposeCallback = Box<FnMut(Response) + Send>;

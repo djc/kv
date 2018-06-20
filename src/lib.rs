@@ -12,10 +12,9 @@ use std::str::FromStr;
 use std::time::Instant;
 
 pub enum Msg {
-    Propose {
+    Request {
         id: u8,
-        key: Vec<u8>,
-        value: Vec<u8>,
+        cmd: Command,
         cb: ResultCallback,
     },
     // Here we don't use Raft Message, so use dead_code to
@@ -27,6 +26,8 @@ pub enum Msg {
 
 #[derive(Clone, Debug, Deserialize, Serialize, StructOpt)]
 pub enum Command {
+    #[structopt(name = "get")]
+    Get { key: ByteStr },
     #[structopt(name = "set")]
     Set { key: ByteStr, value: ByteStr },
 }
@@ -41,11 +42,17 @@ impl FromStr for ByteStr {
     }
 }
 
-pub type CommandResult = Result<Response, ()>;
+pub type CommandResult = Result<Response, Error>;
 
 #[derive(Debug, Deserialize, Serialize)]
 pub enum Response {
     Applied,
+    Value(ByteStr),
+}
+
+#[derive(Debug, Deserialize, Serialize)]
+pub enum Error {
+    NotFound,
 }
 
 pub type ResultCallback = Box<FnMut(CommandResult) + Send>;

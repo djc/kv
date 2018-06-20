@@ -26,7 +26,7 @@ use futures::sync::mpsc::{self, Receiver, Sender};
 use futures::sync::oneshot;
 use futures::{Async, Future, Poll, Sink, Stream};
 
-use kv::{Command, CommandResult, Msg, Response, ResultCallback};
+use kv::{ByteStr, Command, CommandResult, Error, Msg, Response, ResultCallback};
 
 use std::collections::HashMap;
 use std::io;
@@ -137,6 +137,33 @@ impl Node {
                 .unwrap();
         }
 
+        if !ready.read_states.is_empty() {
+            for rs in &ready.read_states {
+                let max = rs.index + 1;
+                let entries = self.r.get_store().entries(1, max, u64::max_value()).unwrap();
+
+                let id = rs.request_ctx[0];
+                let mut prefix = vec![(rs.request_ctx.len() - 1) as u8];
+                prefix.extend(&rs.request_ctx[1..]);
+                let prefix_len = prefix.len();
+
+                let mut res = Err(Error::NotFound);
+                for e in entries.iter().rev() {
+                    if e.data.len() < prefix_len {
+                        continue;
+                    }
+                    if prefix == &e.data[..prefix_len] {
+                        res = Ok(Response::Value(ByteStr(e.data[prefix_len + 1..].to_vec())));
+                        break;
+                    }
+                }
+
+                if let Some(mut cb) = self.cbs.remove(&id) {
+                    cb(res);
+                }
+            }
+        }
+
         if !ready.entries.is_empty() {
             // Append entries to the Raft log
             self.r.mut_store().wl().append(&ready.entries).unwrap();
@@ -190,18 +217,26 @@ impl Future for Node {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         loop {
             match try_ready!(self.future.poll()) {
-                Some(Msg::Propose {
+                Some(Msg::Request {
                     id,
-                    mut key,
-                    mut value,
+                    cmd,
                     cb,
                 }) => {
                     self.cbs.insert(id, cb);
-                    let mut entry_data = vec![key.len() as u8];
-                    entry_data.append(&mut key);
-                    entry_data.push(value.len() as u8);
-                    entry_data.append(&mut value);
-                    self.r.propose(vec![id], entry_data).unwrap();
+                    match cmd {
+                        Command::Set { mut key, mut value } => {
+                            let mut entry_data = vec![key.0.len() as u8];
+                            entry_data.append(&mut key.0);
+                            entry_data.push(value.0.len() as u8);
+                            entry_data.append(&mut value.0);
+                            self.r.propose(vec![id], entry_data).unwrap();
+                        }
+                        Command::Get { mut key } => {
+                            let mut entry_data = vec![id];
+                            entry_data.append(&mut key.0);
+                            self.r.read_index(entry_data);
+                        }
+                    }
                 }
                 Some(Msg::Raft(m)) => self.r.step(m).unwrap(),
                 Some(Msg::Tick(_)) => {
@@ -264,20 +299,18 @@ impl Future for ClientConnection {
                 };
 
                 match cmd {
-                    Some(Command::Set { key, value }) => {
+                    Some(cmd) => {
                         let (s1, r1) = oneshot::channel::<CommandResult>();
-                        // Send a command to the Raft, wait for the Raft to apply it
-                        // and get the result.
                         let mut s1 = Some(s1);
-                        println!("propose a request");
-                        let msg = Msg::Propose {
+                        println!("send request: {:?}", cmd);
+                        let msg = Msg::Request {
                             id: 1,
-                            key: key.0,
-                            value: value.0,
+                            cmd,
                             cb: Box::new(move |rsp| {
                                 s1.take().unwrap().send(rsp).unwrap();
                             }),
                         };
+
                         self.node_send = Some(sender.send(msg));
                         self.receiver = Some(r1);
                         waiting = false;
@@ -303,10 +336,10 @@ impl Future for ClientConnection {
             self.node_send.take();
             if let Some(ref mut receiver) = self.receiver {
                 match receiver.poll() {
-                    Ok(Async::Ready(n)) => {
-                        println!("receive the propose callback");
+                    Ok(Async::Ready(rsp)) => {
+                        println!("send response: {:?}", rsp);
                         let sink = self.rsp_sink.take().unwrap();
-                        self.client_send = Some(sink.send(n));
+                        self.client_send = Some(sink.send(rsp));
                         waiting = false;
                     }
                     Ok(Async::NotReady) => {

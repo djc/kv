@@ -140,7 +140,10 @@ impl Node {
         if !ready.read_states.is_empty() {
             for rs in &ready.read_states {
                 let max = rs.index + 1;
-                let entries = self.r.get_store().entries(1, max, u64::max_value()).unwrap();
+                let entries = self.r
+                    .get_store()
+                    .entries(1, max, u64::max_value())
+                    .unwrap();
 
                 let id = rs.request_ctx[0];
                 let mut prefix = vec![(rs.request_ctx.len() - 1) as u8];
@@ -217,11 +220,7 @@ impl Future for Node {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         loop {
             match try_ready!(self.future.poll()) {
-                Some(Msg::Request {
-                    id,
-                    cmd,
-                    cb,
-                }) => {
+                Some(Msg::Request { id, cmd, cb }) => {
                     self.cbs.insert(id, cb);
                     match cmd {
                         Command::Set { mut key, mut value } => {
@@ -364,7 +363,9 @@ impl Future for ClientConnection {
             }
 
             self.client_send.take();
-            if self.ending && self.node_send.is_none() && self.client_send.is_none() && self.receiver.is_none() {
+            if self.ending && self.node_send.is_none() && self.client_send.is_none()
+                && self.receiver.is_none()
+            {
                 break Ok(Async::Ready(()));
             }
             if waiting {
@@ -382,7 +383,10 @@ impl Decoder for ClientStream {
     fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
         match bincode::deserialize(src) {
             Ok(cmd) => Ok(Some(cmd)),
-            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("decode: {:?}", e))),
+            Err(e) => Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("decode: {:?}", e),
+            )),
         }
     }
 }

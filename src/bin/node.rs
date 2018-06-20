@@ -28,7 +28,7 @@ use futures::{Async, Future, Poll, Sink, Stream};
 
 use kv::{ByteStr, Command, CommandResult, Error, Msg, Response, ResultCallback};
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io;
 use std::time::{Duration, Instant};
 
@@ -157,18 +157,26 @@ impl Node {
                 let prefix_len = prefix.len();
 
                 let mut found = Vec::new();
+                let mut ignore = HashSet::new();
                 for e in entries.iter().rev() {
                     if e.data.is_empty() || e.data.len() < prefix_len {
                         continue;
                     }
                     if exact && prefix == &e.data[..prefix_len] {
-                        found.push(ByteStr(e.data[prefix_len + 1..].to_vec()));
+                        if e.data.len() > prefix_len {
+                            found.push(ByteStr(e.data[prefix_len + 1..].to_vec()));
+                        }
                         if exact {
                             break;
                         }
                     } else if prefix_len == 0 || prefix == &e.data[1..prefix_len + 1] {
                         let key_len = e.data[0] as usize;
-                        found.push(ByteStr(e.data[1..key_len + 1].to_vec()));
+                        let key = ByteStr(e.data[1..key_len + 1].to_vec());
+                        if e.data.len() > (key_len + 1) && !ignore.contains(&key) {
+                            found.push(key)
+                        } else {
+                            ignore.insert(key);
+                        }
                     }
                 }
 
@@ -245,8 +253,10 @@ impl Future for Node {
                         Command::Set { mut key, mut value } => {
                             let mut entry_data = vec![key.0.len() as u8];
                             entry_data.append(&mut key.0);
-                            entry_data.push(value.0.len() as u8);
-                            entry_data.append(&mut value.0);
+                            if !value.0.is_empty() {
+                                entry_data.push(value.0.len() as u8);
+                                entry_data.append(&mut value.0);
+                            }
                             self.r.propose(vec![id], entry_data).unwrap();
                         }
                         Command::Get { mut key } => {

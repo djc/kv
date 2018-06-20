@@ -34,7 +34,7 @@ pub enum Command {
     Set { key: ByteStr, value: ByteStr },
 }
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 pub struct ByteStr(pub Vec<u8>);
 
 impl FromStr for ByteStr {

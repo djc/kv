@@ -320,20 +320,20 @@ impl Future for ClientConnection {
                 }
             }
 
-            if let Some(ref mut send) = self.node_send {
+            if let Some(mut send) = self.node_send.take() {
                 match send.poll() {
                     Ok(Async::Ready(_)) => {
                         waiting = false;
                     }
                     Ok(Async::NotReady) => {
+                        self.node_send = Some(send);
                         return Ok(Async::NotReady);
                     }
                     Err(e) => panic!("sending failed: {:?}", e),
                 }
             }
 
-            self.node_send.take();
-            if let Some(ref mut receiver) = self.receiver {
+            if let Some(mut receiver) = self.receiver.take() {
                 match receiver.poll() {
                     Ok(Async::Ready(rsp)) => {
                         println!("send response: {:?}", rsp);
@@ -342,30 +342,28 @@ impl Future for ClientConnection {
                         waiting = false;
                     }
                     Ok(Async::NotReady) => {
+                        self.receiver = Some(receiver);
                         return Ok(Async::NotReady);
                     }
                     Err(e) => panic!("receiver canceled: {:?}", e),
                 }
             }
 
-            self.receiver.take();
-            if let Some(ref mut send) = self.client_send {
+            if let Some(mut send) = self.client_send.take() {
                 match send.poll() {
                     Ok(Async::Ready(sink)) => {
                         self.rsp_sink = Some(sink);
                         waiting = false;
                     }
                     Ok(Async::NotReady) => {
+                        self.client_send = Some(send);
                         return Ok(Async::NotReady);
                     }
                     Err(e) => panic!("sending to client failed: {:?}", e),
                 }
             }
 
-            self.client_send.take();
-            if self.ending && self.node_send.is_none() && self.client_send.is_none()
-                && self.receiver.is_none()
-            {
+            if self.ending {
                 break Ok(Async::Ready(()));
             }
             if waiting {

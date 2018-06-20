@@ -29,7 +29,7 @@ pub enum Command {
     #[structopt(name = "get")]
     Get { key: ByteStr },
     #[structopt(name = "list")]
-    List { prefix: ByteStr },
+    List { prefix: Option<ByteStr> },
     #[structopt(name = "set")]
     Set { key: ByteStr, value: ByteStr },
 }

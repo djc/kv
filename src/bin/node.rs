@@ -266,7 +266,12 @@ impl Future for Node {
                         }
                         Command::List { mut prefix } => {
                             let mut entry_data = vec![1, id];
-                            entry_data.append(&mut prefix.0);
+                            match prefix {
+                                Some(mut prefix) => {
+                                    entry_data.append(&mut prefix.0);
+                                }
+                                None => {}
+                            }
                             self.r.read_index(entry_data);
                         }
                     }

@@ -16,10 +16,10 @@ extern crate kv;
 extern crate raft;
 extern crate tokio;
 
-use futures::sync::oneshot;
-use futures::sync::mpsc::{self, Receiver, Sender};
-use futures::{Async, Future, Poll, Sink, Stream};
 use futures::sink;
+use futures::sync::mpsc::{self, Receiver, Sender};
+use futures::sync::oneshot;
+use futures::{Async, Future, Poll, Sink, Stream};
 
 use kv::{Msg, ProposeCallback, Response};
 
@@ -42,7 +42,7 @@ fn main() {
 
 struct Node {
     r: RawNode<MemStorage>,
-    future: Box<Stream<Item = Msg, Error = ()> + Send> ,
+    future: Box<Stream<Item = Msg, Error = ()> + Send>,
     cbs: HashMap<u8, ProposeCallback>,
 }
 
@@ -167,7 +167,12 @@ impl Future for Node {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         loop {
             match try_ready!(self.future.poll()) {
-                Some(Msg::Propose { id, mut key, mut value, cb }) => {
+                Some(Msg::Propose {
+                    id,
+                    mut key,
+                    mut value,
+                    cb,
+                }) => {
                     self.cbs.insert(id, cb);
                     let mut entry_data = vec![key.len() as u8];
                     entry_data.append(&mut key);
@@ -181,7 +186,7 @@ impl Future for Node {
                 }
                 None => {
                     break Ok(Async::Ready(()));
-                },
+                }
             }
             self.on_ready();
         }
@@ -233,7 +238,7 @@ impl Future for ClientConnection {
                     value: b"bar".to_vec(),
                     cb: Box::new(move |rsp| {
                         s1.take().unwrap().send(rsp).unwrap();
-                    })
+                    }),
                 };
                 self.send = Some(sender.send(msg));
                 self.receiver = Some(r1);

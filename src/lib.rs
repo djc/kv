@@ -28,6 +28,8 @@ pub enum Msg {
 pub enum Command {
     #[structopt(name = "get")]
     Get { key: ByteStr },
+    #[structopt(name = "list")]
+    List { prefix: ByteStr },
     #[structopt(name = "set")]
     Set { key: ByteStr, value: ByteStr },
 }
@@ -48,6 +50,7 @@ pub type CommandResult = Result<Response, Error>;
 pub enum Response {
     Applied,
     Value(ByteStr),
+    Keys(Vec<ByteStr>),
 }
 
 #[derive(Debug, Deserialize, Serialize)]

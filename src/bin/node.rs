@@ -145,21 +145,40 @@ impl Node {
                     .entries(1, max, u64::max_value())
                     .unwrap();
 
-                let id = rs.request_ctx[0];
-                let mut prefix = vec![(rs.request_ctx.len() - 1) as u8];
-                prefix.extend(&rs.request_ctx[1..]);
+                let exact = rs.request_ctx[0] == 0;
+                let id = rs.request_ctx[1];
+                let mut prefix = vec![];
+                if rs.request_ctx.len() > 2 {
+                    if exact {
+                        prefix.push((rs.request_ctx.len() - 2) as u8);
+                    }
+                    prefix.extend(&rs.request_ctx[2..]);
+                }
                 let prefix_len = prefix.len();
 
-                let mut res = Err(Error::NotFound);
+                let mut found = Vec::new();
                 for e in entries.iter().rev() {
-                    if e.data.len() < prefix_len {
+                    if e.data.is_empty() || e.data.len() < prefix_len {
                         continue;
                     }
-                    if prefix == &e.data[..prefix_len] {
-                        res = Ok(Response::Value(ByteStr(e.data[prefix_len + 1..].to_vec())));
-                        break;
+                    if exact && prefix == &e.data[..prefix_len] {
+                        found.push(ByteStr(e.data[prefix_len + 1..].to_vec()));
+                        if exact {
+                            break;
+                        }
+                    } else if prefix_len == 0 || prefix == &e.data[1..prefix_len + 1] {
+                        let key_len = e.data[0] as usize;
+                        found.push(ByteStr(e.data[1..key_len + 1].to_vec()));
                     }
                 }
+
+                let res = if !exact {
+                    Ok(Response::Keys(found))
+                } else if found.len() == 0 {
+                    Err(Error::NotFound)
+                } else {
+                    Ok(Response::Value(found.pop().unwrap()))
+                };
 
                 if let Some(mut cb) = self.cbs.remove(&id) {
                     cb(res);
@@ -231,8 +250,13 @@ impl Future for Node {
                             self.r.propose(vec![id], entry_data).unwrap();
                         }
                         Command::Get { mut key } => {
-                            let mut entry_data = vec![id];
+                            let mut entry_data = vec![0, id];
                             entry_data.append(&mut key.0);
+                            self.r.read_index(entry_data);
+                        }
+                        Command::List { mut prefix } => {
+                            let mut entry_data = vec![1, id];
+                            entry_data.append(&mut prefix.0);
                             self.r.read_index(entry_data);
                         }
                     }

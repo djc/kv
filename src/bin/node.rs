@@ -10,33 +10,56 @@
 // distributed under the License is distributed on an "AS IS" BASIS,
 // See the License for the specific language governing permissions and
 // limitations under the License.
+extern crate bincode;
+extern crate bytes;
 #[macro_use]
 extern crate futures;
 extern crate kv;
 extern crate raft;
 extern crate tokio;
+extern crate tokio_codec;
+
+use bytes::{BufMut, BytesMut};
 
 use futures::sink;
 use futures::sync::mpsc::{self, Receiver, Sender};
 use futures::sync::oneshot;
 use futures::{Async, Future, Poll, Sink, Stream};
 
-use kv::{Msg, ProposeCallback, Response};
+use kv::{Command, Msg, ProposeCallback, Response};
 
 use std::collections::HashMap;
+use std::io;
 use std::time::{Duration, Instant};
 
 use raft::prelude::*;
 use raft::storage::MemStorage;
 
-use tokio::timer::{Delay, Interval};
+use tokio::io::AsyncRead;
+use tokio::net::{TcpListener, TcpStream};
+use tokio::timer::Interval;
+
+use tokio_codec::{Decoder, Encoder, FramedRead, FramedWrite};
 
 // A simple example about how to use the Raft library in Rust.
 fn main() {
     let (sender, receiver) = mpsc::channel(5);
     let mut rt = tokio::runtime::Runtime::new().unwrap();
-    rt.spawn(ClientConnection::new(sender));
     rt.spawn(Node::new(receiver));
+
+    let addr = "127.0.0.1:12345".parse().unwrap();
+    let tcp = TcpListener::bind(&addr).unwrap();
+    let server = tcp.incoming()
+        .for_each(move |tcp| {
+            let conn = ClientConnection::new(tcp, sender.clone());
+            tokio::spawn(conn);
+            Ok(())
+        })
+        .map_err(|e| {
+            println!("server error {:?}", e);
+        });
+
+    rt.spawn(server);
     rt.shutdown_on_idle().wait().unwrap();
 }
 
@@ -194,21 +217,26 @@ impl Future for Node {
 }
 
 struct ClientConnection {
+    cmd_stream: Box<Stream<Item = Command, Error = io::Error> + Send>,
+    rsp_sink: Option<BoxedResponseSink>,
     sender: Option<Sender<Msg>>,
-    trigger: Option<Box<Future<Item = (), Error = ()> + Send>>,
-    send: Option<sink::Send<Sender<Msg>>>,
+    node_send: Option<sink::Send<Sender<Msg>>>,
+    client_send: Option<sink::Send<BoxedResponseSink>>,
     receiver: Option<oneshot::Receiver<Response>>,
+    ending: bool,
 }
 
 impl ClientConnection {
-    fn new(sender: Sender<Msg>) -> Self {
-        let trigger = Delay::new(Instant::now() + Duration::from_secs(2))
-            .map_err(|e| panic!("timer failed; err={:?}", e));
+    fn new(tcp: TcpStream, sender: Sender<Msg>) -> Self {
+        let (read, write) = tcp.split();
         Self {
+            cmd_stream: Box::new(FramedRead::new(read, ClientStream {})),
+            rsp_sink: Some(Box::new(FramedWrite::new(write, ClientStream {}))),
             sender: Some(sender),
-            trigger: Some(Box::new(trigger)),
-            send: None,
+            node_send: None,
+            client_send: None,
             receiver: None,
+            ending: false,
         }
     }
 }
@@ -220,32 +248,47 @@ impl Future for ClientConnection {
     fn poll(&mut self) -> Poll<Self::Item, Self::Error> {
         let mut waiting = true;
         loop {
-            if let Some(ref mut trigger) = self.trigger {
-                let _ = try_ready!(trigger.poll());
-                waiting = false;
-            }
-
-            self.trigger.take();
             if let Some(sender) = self.sender.take() {
-                let (s1, r1) = oneshot::channel::<Response>();
-                // Send a command to the Raft, wait for the Raft to apply it
-                // and get the result.
-                let mut s1 = Some(s1);
-                println!("propose a request");
-                let msg = Msg::Propose {
-                    id: 1,
-                    key: b"foo".to_vec(),
-                    value: b"bar".to_vec(),
-                    cb: Box::new(move |rsp| {
-                        s1.take().unwrap().send(rsp).unwrap();
-                    }),
+                let cmd = match self.cmd_stream.poll() {
+                    Ok(Async::Ready(Some(cmd))) => {
+                        waiting = false;
+                        Some(cmd)
+                    }
+                    Ok(Async::Ready(None)) => {
+                        waiting = false;
+                        self.ending = true;
+                        None
+                    }
+                    Ok(Async::NotReady) => None,
+                    Err(e) => panic!("cmd stream error: {:?}", e),
                 };
-                self.send = Some(sender.send(msg));
-                self.receiver = Some(r1);
-                waiting = false;
+
+                match cmd {
+                    Some(Command::Set { key, value }) => {
+                        let (s1, r1) = oneshot::channel::<Response>();
+                        // Send a command to the Raft, wait for the Raft to apply it
+                        // and get the result.
+                        let mut s1 = Some(s1);
+                        println!("propose a request");
+                        let msg = Msg::Propose {
+                            id: 1,
+                            key: key.0,
+                            value: value.0,
+                            cb: Box::new(move |rsp| {
+                                s1.take().unwrap().send(rsp).unwrap();
+                            }),
+                        };
+                        self.node_send = Some(sender.send(msg));
+                        self.receiver = Some(r1);
+                        waiting = false;
+                    }
+                    None => {
+                        self.sender = Some(sender);
+                    }
+                }
             }
 
-            if let Some(ref mut send) = self.send {
+            if let Some(ref mut send) = self.node_send {
                 match send.poll() {
                     Ok(Async::Ready(_)) => {
                         waiting = false;
@@ -257,13 +300,14 @@ impl Future for ClientConnection {
                 }
             }
 
-            self.send.take();
+            self.node_send.take();
             if let Some(ref mut receiver) = self.receiver {
                 match receiver.poll() {
                     Ok(Async::Ready(n)) => {
-                        assert_eq!(n, Ok(()));
                         println!("receive the propose callback");
-                        return Ok(Async::Ready(()));
+                        let sink = self.rsp_sink.take().unwrap();
+                        self.client_send = Some(sink.send(n));
+                        waiting = false;
                     }
                     Ok(Async::NotReady) => {
                         return Ok(Async::NotReady);
@@ -271,9 +315,52 @@ impl Future for ClientConnection {
                     Err(e) => panic!("receiver canceled: {:?}", e),
                 }
             }
+
+            self.receiver.take();
+            if let Some(ref mut send) = self.client_send {
+                match send.poll() {
+                    Ok(Async::Ready(sink)) => {
+                        self.rsp_sink = Some(sink);
+                        waiting = false;
+                    }
+                    Ok(Async::NotReady) => {
+                        return Ok(Async::NotReady);
+                    }
+                    Err(e) => panic!("sending to client failed: {:?}", e),
+                }
+            }
+
+            self.client_send.take();
+            if self.ending && self.node_send.is_none() && self.client_send.is_none() && self.receiver.is_none() {
+                break Ok(Async::Ready(()));
+            }
             if waiting {
                 break Ok(Async::NotReady);
             }
         }
     }
 }
+
+struct ClientStream {}
+
+impl Decoder for ClientStream {
+    type Item = Command;
+    type Error = io::Error;
+    fn decode(&mut self, src: &mut BytesMut) -> Result<Option<Self::Item>, Self::Error> {
+        match bincode::deserialize(src) {
+            Ok(cmd) => Ok(Some(cmd)),
+            Err(e) => Err(io::Error::new(io::ErrorKind::InvalidData, format!("decode: {:?}", e))),
+        }
+    }
+}
+
+impl Encoder for ClientStream {
+    type Item = Response;
+    type Error = io::Error;
+    fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
+        bincode::serialize_into(&mut dst.writer(), &item).unwrap();
+        Ok(())
+    }
+}
+
+type BoxedResponseSink = Box<Sink<SinkItem = Response, SinkError = io::Error> + Send>;

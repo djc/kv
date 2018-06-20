@@ -4,6 +4,12 @@ version = "0.1.0"
 authors = ["Dirkjan Ochtman <dirkjan@ochtman.nl>"]
 
 [dependencies]
+bincode = "1"
+bytes = "0.4"
 futures = "0.1"
 tokio = "0.1"
+tokio-codec = "0.1"
 raft = "0.3"
+serde = "1"
+serde_derive = "1"
+structopt = "0.2"

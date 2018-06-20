@@ -16,7 +16,7 @@ pub enum Msg {
         id: u8,
         key: Vec<u8>,
         value: Vec<u8>,
-        cb: ProposeCallback,
+        cb: ResultCallback,
     },
     // Here we don't use Raft Message, so use dead_code to
     // avoid the compiler warning.
@@ -41,6 +41,11 @@ impl FromStr for ByteStr {
     }
 }
 
-pub type Response = Result<(), ()>;
+pub type CommandResult = Result<Response, ()>;
 
-pub type ProposeCallback = Box<FnMut(Response) + Send>;
+#[derive(Debug, Deserialize, Serialize)]
+pub enum Response {
+    Applied,
+}
+
+pub type ResultCallback = Box<FnMut(CommandResult) + Send>;

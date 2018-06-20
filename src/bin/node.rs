@@ -26,7 +26,7 @@ use futures::sync::mpsc::{self, Receiver, Sender};
 use futures::sync::oneshot;
 use futures::{Async, Future, Poll, Sink, Stream};
 
-use kv::{Command, Msg, ProposeCallback, Response};
+use kv::{Command, CommandResult, Msg, Response, ResultCallback};
 
 use std::collections::HashMap;
 use std::io;
@@ -66,7 +66,7 @@ fn main() {
 struct Node {
     r: RawNode<MemStorage>,
     future: Box<Stream<Item = Msg, Error = ()> + Send>,
-    cbs: HashMap<u8, ProposeCallback>,
+    cbs: HashMap<u8, ResultCallback>,
 }
 
 impl Node {
@@ -170,7 +170,7 @@ impl Node {
 
                 if entry.get_entry_type() == EntryType::EntryNormal {
                     if let Some(mut cb) = self.cbs.remove(entry.get_context().get(0).unwrap()) {
-                        cb(Ok(()));
+                        cb(Ok(Response::Applied));
                     }
                 }
 
@@ -218,11 +218,11 @@ impl Future for Node {
 
 struct ClientConnection {
     cmd_stream: Box<Stream<Item = Command, Error = io::Error> + Send>,
-    rsp_sink: Option<BoxedResponseSink>,
+    rsp_sink: Option<BoxedResultSink>,
     sender: Option<Sender<Msg>>,
     node_send: Option<sink::Send<Sender<Msg>>>,
-    client_send: Option<sink::Send<BoxedResponseSink>>,
-    receiver: Option<oneshot::Receiver<Response>>,
+    client_send: Option<sink::Send<BoxedResultSink>>,
+    receiver: Option<oneshot::Receiver<CommandResult>>,
     ending: bool,
 }
 
@@ -265,7 +265,7 @@ impl Future for ClientConnection {
 
                 match cmd {
                     Some(Command::Set { key, value }) => {
-                        let (s1, r1) = oneshot::channel::<Response>();
+                        let (s1, r1) = oneshot::channel::<CommandResult>();
                         // Send a command to the Raft, wait for the Raft to apply it
                         // and get the result.
                         let mut s1 = Some(s1);
@@ -355,7 +355,7 @@ impl Decoder for ClientStream {
 }
 
 impl Encoder for ClientStream {
-    type Item = Response;
+    type Item = CommandResult;
     type Error = io::Error;
     fn encode(&mut self, item: Self::Item, dst: &mut BytesMut) -> Result<(), Self::Error> {
         bincode::serialize_into(&mut dst.writer(), &item).unwrap();
@@ -363,4 +363,4 @@ impl Encoder for ClientStream {
     }
 }
 
-type BoxedResponseSink = Box<Sink<SinkItem = Response, SinkError = io::Error> + Send>;
+type BoxedResultSink = Box<Sink<SinkItem = CommandResult, SinkError = io::Error> + Send>;
